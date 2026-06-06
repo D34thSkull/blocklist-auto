@@ -336,3 +336,8 @@ zws5.web.telegram.org
 p.typekit.net
 tb-cdn.st
 nperf.com
+region1.google-analytics.com
+googletagmanager.com
+nos.pt
+
+
