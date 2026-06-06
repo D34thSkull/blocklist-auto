@@ -339,5 +339,6 @@ nperf.com
 region1.google-analytics.com
 googletagmanager.com
 nos.pt
-
-
+sentry.nperf.com
+ws.nperf.com
+65efa6cd-a7bb-4161-896b-64e2ec5fdf88-ws.nperf.com
