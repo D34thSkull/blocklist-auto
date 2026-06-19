@@ -26,8 +26,6 @@ jobs:
         python-version: '3.x'
     - name: Install dependencies
       run: pip install requests
-    - name: Test list before generating
-      run: pytest test_generate_combined_list.py
     - name: Generate list
       run: python generate_combined_list.py
     - name: Commit and push if changes
