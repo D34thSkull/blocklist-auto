@@ -1,5 +1,5 @@
 import pytest
-from generate_combined_list import clean_and_normalize_domain
+from generate_combined_list import clean_and_normalize_domain, remove_redundant_subdomains
 
 
 # --- Formato AdGuard / Adblock Plus -----------------------------------------
@@ -111,3 +111,43 @@ def test_single_label_tld_like_string():
 )
 def test_same_domain_across_formats(line, expected):
     assert clean_and_normalize_domain(line) == expected
+
+
+# --- remove_redundant_subdomains --------------------------------------------
+
+def test_removes_direct_subdomain_when_parent_present():
+    result = remove_redundant_subdomains({"tracker.com", "ads.tracker.com"})
+    assert result == {"tracker.com"}
+
+
+def test_removes_multi_level_subdomain_when_parent_present():
+    result = remove_redundant_subdomains(
+        {"tracker.com", "ads.tracker.com", "x.ads.tracker.com"}
+    )
+    assert result == {"tracker.com"}
+
+
+def test_keeps_unrelated_domains():
+    result = remove_redundant_subdomains({"a.com", "b.com"})
+    assert result == {"a.com", "b.com"}
+
+
+def test_keeps_subdomain_when_parent_not_present():
+    result = remove_redundant_subdomains({"ads.tracker.com"})
+    assert result == {"ads.tracker.com"}
+
+
+def test_never_reduces_below_two_labels():
+    # "tracker.com" não deve ser tratado como tendo "com" como pai
+    result = remove_redundant_subdomains({"tracker.com"})
+    assert result == {"tracker.com"}
+
+
+def test_empty_set():
+    assert remove_redundant_subdomains(set()) == set()
+
+
+def test_does_not_remove_siblings_with_same_parent_label():
+    # "shop.example.com" e "blog.example.com" não são pai/filho um do outro
+    result = remove_redundant_subdomains({"shop.example.com", "blog.example.com"})
+    assert result == {"shop.example.com", "blog.example.com"}
