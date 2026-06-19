@@ -1,13 +1,86 @@
-https://adguardteam.github.io/HostlistsRegistry/assets/filter_51.txt
+# =============================================================================
+# sources.txt — Fontes de blocklists para o blocklist-auto
+# =============================================================================
+# Cada linha não-comentada deve ser uma URL direta para um ficheiro de
+# blocklist (formato AdGuard/Adblock Plus ou hosts). Linhas começadas
+# por "#" são ignoradas pelo script.
+#
+# Todas as URLs abaixo vêm da AdGuard HostlistsRegistry (re-hospedadas e
+# validadas pela própria AdGuard), o que garante atualizações fiáveis e
+# formato consistente.
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# GERAL — Ads, tracking e telemetria geral
+# -----------------------------------------------------------------------------
+
+# HaGeZi's Pro Blocklist — base media de ads/tracking/scam/malware
+https://adguardteam.github.io/HostlistsRegistry/assets/filter_48.txt
+
+# OISD Blocklist Small — mais conservadora, complementa o HaGeZi acima
 https://adguardteam.github.io/HostlistsRegistry/assets/filter_5.txt
-https://adguardteam.github.io/HostlistsRegistry/assets/filter_61.txt
-https://adguardteam.github.io/HostlistsRegistry/assets/filter_63.txt
-https://adguardteam.github.io/HostlistsRegistry/assets/filter_60.txt
-#https://adguardteam.github.io/HostlistsRegistry/assets/filter_44.txt #Lista muito grande a ver se optimizamos isto
-https://adguardteam.github.io/HostlistsRegistry/assets/filter_7.txt
-https://adguardteam.github.io/HostlistsRegistry/assets/filter_8.txt
+
+# -----------------------------------------------------------------------------
+# SEGURANÇA — Malware, phishing e scam
+# -----------------------------------------------------------------------------
+
+# HaGeZi's Threat Intelligence Feeds — malware, cryptojacking, spam, phishing
+#https://adguardteam.github.io/HostlistsRegistry/assets/filter_44.txt #Desativo temporariamente para testes
+
+# Phishing Army — domínios de phishing
 https://adguardteam.github.io/HostlistsRegistry/assets/filter_18.txt
+
+# Phishing URL Blocklist (PhishTank + OpenPhish) — complementa o Phishing Army
+https://adguardteam.github.io/HostlistsRegistry/assets/filter_30.txt
+
+# Scam Blocklist by DurableNapkin — websites pouco fiáveis / scam
 https://adguardteam.github.io/HostlistsRegistry/assets/filter_10.txt
+
+# The Big List of Hacked Malware Web Sites — sites comprometidos com malware
 https://adguardteam.github.io/HostlistsRegistry/assets/filter_9.txt
+
+# Malicious URL Blocklist (URLHaus) — servidores de distribuição de malware
 https://adguardteam.github.io/HostlistsRegistry/assets/filter_11.txt
-# Podes adicionar URLs de outras listas que uses ou alterar as que estão já adicionadas
+
+# Stalkerware Indicators List — indicadores de apps de stalkerware/spyware
+https://adguardteam.github.io/HostlistsRegistry/assets/filter_31.txt
+
+# HaGeZi's DynDNS Blocklist — domínios dinâmicos usados em phishing/malware
+https://adguardteam.github.io/HostlistsRegistry/assets/filter_54.txt
+
+# NoCoin Filter List — bloqueia cryptomining no browser
+https://adguardteam.github.io/HostlistsRegistry/assets/filter_8.txt
+
+# -----------------------------------------------------------------------------
+# TELEMETRIA NATIVA — Trackers embutidos por fabricantes de dispositivos
+# -----------------------------------------------------------------------------
+
+# HaGeZi's Samsung Tracker Blocklist
+https://adguardteam.github.io/HostlistsRegistry/assets/filter_61.txt
+
+# HaGeZi's Xiaomi Tracker Blocklist
+https://adguardteam.github.io/HostlistsRegistry/assets/filter_60.txt
+
+# HaGeZi's Windows/Office Tracker Blocklist
+https://adguardteam.github.io/HostlistsRegistry/assets/filter_63.txt
+
+# HaGeZi's Apple Tracker Blocklist
+https://adguardteam.github.io/HostlistsRegistry/assets/filter_67.txt
+
+# HaGeZi's Vivo Tracker Blocklist
+https://adguardteam.github.io/HostlistsRegistry/assets/filter_65.txt
+
+# HaGeZi's OPPO & Realme Tracker Blocklist
+https://adguardteam.github.io/HostlistsRegistry/assets/filter_66.txt
+
+# -----------------------------------------------------------------------------
+# SMART TV — Telemetria de Smart TVs e apps relacionadas
+# -----------------------------------------------------------------------------
+
+# Perflyst and Dandelion Sprout's Smart-TV Blocklist
+https://adguardteam.github.io/HostlistsRegistry/assets/filter_7.txt
+
+# -----------------------------------------------------------------------------
+# Podes adicionar URLs de outras listas que uses, ou comentar (#) as que
+# não queiras usar, sem precisar de remover a linha.
+# -----------------------------------------------------------------------------
