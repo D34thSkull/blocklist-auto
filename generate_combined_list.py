@@ -132,6 +132,49 @@ def clean_and_normalize_domain(domain_line):
 # ---------------------------------------------------------------------------
 # Pipeline principal
 # ---------------------------------------------------------------------------
+def remove_redundant_subdomains(domains):
+    """Remove subdomínios cujo domínio "pai" já está na lista.
+
+    Se 'tracker.com' está na lista, bloqueá-lo já bloqueia
+    'ads.tracker.com', 'x.ads.tracker.com', etc. — por isso esses
+    subdomínios são redundantes e podem ser removidos para reduzir
+    o tamanho final da lista sem perder cobertura.
+
+    Limitação conhecida: não usa uma "public suffix list", por isso
+    mantém sempre pelo menos 2 labels (ex: nunca reduz a apenas "com").
+    Domínios com TLDs compostos (ex: "co.uk", "com.br") podem, em casos
+    raros, ser tratados como "pai" de algo que na prática é um domínio
+    independente (ex: "example.co.uk" não deveria ser considerado pai
+    de "other.co.uk"). Para a esmagadora maioria dos casos isto não é
+    um problema, mas fica documentado.
+    """
+    domains_set = set(domains)
+    result = set()
+    removed_count = 0
+
+    for domain in domains_set:
+        labels = domain.split(".")
+        is_redundant = False
+
+        # Gera candidatos a "pai": vai removendo o label mais à esquerda,
+        # mas nunca reduz a menos de 2 labels (evita tratar TLDs como pai).
+        for i in range(1, len(labels) - 1):
+            parent_candidate = ".".join(labels[i:])
+            if parent_candidate in domains_set:
+                is_redundant = True
+                break
+
+        if is_redundant:
+            removed_count += 1
+        else:
+            result.add(domain)
+
+    if removed_count:
+        print(f"Subdomínios redundantes removidos: {removed_count}")
+
+    return result
+
+
 def generate_combined_list():
     sources_file = "sources.txt"
     downloaded_blocklists_dir = "blocklists/downloaded"
@@ -194,6 +237,14 @@ def generate_combined_list():
     print("Domínios adicionados por fonte:")
     for filepath, count in sorted(source_stats.items(), key=lambda x: -x[1]):
         print(f"  {filepath}: {count}")
+
+    # 3.5 Remover subdomínios redundantes (ex: descartar "ads.tracker.com"
+    #     se "tracker.com" já está na lista)
+    before_count = len(combined_domains_raw)
+    combined_domains_raw = remove_redundant_subdomains(combined_domains_raw)
+    after_count = len(combined_domains_raw)
+    print(f"Total antes da remoção de subdomínios redundantes: {before_count}")
+    print(f"Total depois da remoção de subdomínios redundantes: {after_count}")
 
     # 4. Escrever para o ficheiro de saída no formato ||domínio^
     with open(output_file, "w", encoding="utf-8") as f:
