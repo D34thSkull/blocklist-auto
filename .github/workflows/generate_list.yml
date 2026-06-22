@@ -4,7 +4,7 @@ name: Generate Combined Blocklist
 on:
   push:
     branches:
-      - main # Ou 'master'
+      - Teste # Ou 'master'
     paths: # Opcional: só corre se estes ficheiros/pastas mudarem
       - 'sources.txt'
       - 'blocklists/custom/**'
