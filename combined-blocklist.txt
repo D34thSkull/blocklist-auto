@@ -1,7 +1,7 @@
 ! Title: Combined AdGuard Home Blocklist
-! Last Updated: 2026-11-05 16:15:31 GMT
+! Last Updated: 2026-11-05 16:50:32 GMT
 ! Added: 0 rules
-! Removed: 323 rules
+! Removed: 0 rules
 ! Expires: 1 day
 ! Homepage: https://github.com/D34thSkull/blocklist-auto
 ! Version: 1.0
