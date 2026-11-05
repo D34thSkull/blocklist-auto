@@ -3,6 +3,7 @@ import ipaddress
 import os
 import re
 import tempfile
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -154,11 +155,11 @@ def load_whitelist():
 
 
 def is_whitelisted(domain, whitelist):
-    """Check the domain and its parent domains in O(number of labels)."""
+    """Check whether a domain is allowed directly or by a parent whitelist."""
     labels = domain.split(".")
     return any(
         ".".join(labels[index:]) in whitelist
-        for index in range(len(labels) - 1)
+        for index in range(len(labels))
     )
 
 
@@ -182,17 +183,12 @@ def required_exceptions(blocked_domains, whitelist_domains):
 
     for allowed_domain in whitelist_domains:
         labels = allowed_domain.split(".")
-        # A whitelist entry needs an AdGuard exception only if a block rule
-        # matches one of its parent domains. The domain itself and its
-        # descendants are already excluded during block filtering.
         for index in range(1, len(labels)):
             parent_domain = ".".join(labels[index:])
             if parent_domain in blocked_domains:
                 required.add(allowed_domain)
                 break
 
-    # An exception for a parent also protects its subdomains, so omit
-    # redundant, more specific exception rules.
     compact = set()
     for domain in sorted(required, key=lambda value: (value.count("."), value)):
         labels = domain.split(".")
@@ -206,8 +202,24 @@ def required_exceptions(blocked_domains, whitelist_domains):
     return compact
 
 
-def write_output(blocked_domains, exceptions):
+def load_previous_rules(filepath):
+    """Return the block and exception rules from the previous generated file."""
+    if not filepath.is_file():
+        return set()
+
+    rules = set()
+    with open(filepath, encoding="utf-8", errors="replace") as file:
+        for line in file:
+            if not line.strip() or line.startswith("!"):
+                continue
+            for domain, rule_type in parse_rule(line):
+                rules.add((rule_type, domain))
+    return rules
+
+
+def write_output(blocked_domains, exceptions, added_count, removed_count):
     """Atomically replace the generated list, preserving required exceptions."""
+    timestamp = time.strftime("%Y-%m-%d %H:%M:%S GMT", time.gmtime())
     fd, temporary_path = tempfile.mkstemp(
         prefix=".combined-blocklist-",
         dir=BASE_DIR,
@@ -215,9 +227,10 @@ def write_output(blocked_domains, exceptions):
     )
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as output:
-            # Keep headers deterministic so unchanged content does not cause
-            # a new generated commit solely because the date changed.
             output.write("! Title: Combined AdGuard Home Blocklist\n")
+            output.write(f"! Last Updated: {timestamp}\n")
+            output.write(f"! Added: {added_count} rules\n")
+            output.write(f"! Removed: {removed_count} rules\n")
             output.write("! Expires: 1 day\n")
             output.write("! Homepage: https://github.com/D34thSkull/blocklist-auto\n")
             output.write("! Version: 1.0\n!\n")
@@ -242,11 +255,10 @@ def main():
     if not sources:
         raise SystemExit("[ERRO] Nenhuma fonte encontrada em sources.txt")
 
+    previous_rules = load_previous_rules(OUTPUT_FILE)
     whitelist_domains = load_whitelist()
     source_results = []
 
-    # Downloads are isolated in a temporary directory, so stale files can
-    # never silently be included in the output.
     with tempfile.TemporaryDirectory(prefix=".blocklists-", dir=BASE_DIR) as temp_dir:
         temp_dir = Path(temp_dir)
         future_to_source = {}
@@ -292,12 +304,27 @@ def main():
     final_domains = remove_redundant_subdomains(filtered_domains)
     exceptions = required_exceptions(final_domains, whitelist_domains)
 
-    write_output(final_domains, exceptions)
+    new_rules = {
+        ("block", domain) for domain in final_domains
+    } | {
+        ("whitelist", domain) for domain in exceptions
+    }
+    added_rules = new_rules - previous_rules
+    removed_rules = previous_rules - new_rules
+
+    write_output(
+        final_domains,
+        exceptions,
+        added_count=len(added_rules),
+        removed_count=len(removed_rules),
+    )
 
     print(f"[INFO] Fontes descarregadas: {len(source_results)}/{len(sources)}")
     print(f"[INFO] Domínios recolhidos: {len(all_blocked)}")
     print(f"[INFO] Domínios na whitelist: {len(whitelist_domains)}")
     print(f"[INFO] Exceções de whitelist necessárias: {len(exceptions)}")
+    print(f"[INFO] Regras adicionadas: {len(added_rules)}")
+    print(f"[INFO] Regras removidas: {len(removed_rules)}")
     print(f"[SUCESSO] Domínios finais: {len(final_domains)}")
     print(f"[SUCESSO] Ficheiro gerado: {OUTPUT_FILE}")
 
