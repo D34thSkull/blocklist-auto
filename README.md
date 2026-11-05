@@ -15,7 +15,6 @@ O projeto reúne listas de bloqueio de anúncios, rastreadores e malware e produ
 
 - `sources.txt` — URLs das listas de origem, uma por linha.
 - `whitelists/` — ficheiros de exceção, um por ficheiro.
-- `blocklists/custom/` — listas locais personalizadas, também usadas no processo.
 - `generate_combined_list.py` — script principal que descarrega, processa e escreve a lista final.
 - `combined-blocklist.txt` — output gerado pela execução do script.
 - `.github/workflows/generate_list.yml` — workflow do GitHub Actions para gerar a lista automaticamente.
