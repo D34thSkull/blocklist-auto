@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="pt-PT">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Blocklist · gestão</title>
+<style>
+:root {
+  --bg: #eef1f3; --panel: #ffffff; --ink: #18232b; --muted: #5d6b75; --line: #d3dae0;
+  --accent: #0b5f7a; --accent-ink: #ffffff; --danger: #a4262c;
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --sans: "Segoe UI", system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #11181d; --panel: #1a242b; --ink: #e5ebef; --muted: #93a3ae; --line: #2f3d47;
+          --accent: #4fb3d1; --accent-ink: #08212b; --danger: #ff8a8f; }
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.45 var(--sans); }
+header { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;
+  padding: 18px clamp(16px, 4vw, 40px); border-bottom: 1px solid var(--line); }
+h1 { font-size: 20px; margin: 0; font-weight: 650; }
+h2 { font-size: 16px; margin: 0; font-weight: 650; }
+.bar { display: flex; gap: 8px; flex-wrap: wrap; }
+main { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; padding: 20px clamp(16px, 4vw, 40px) 60px;
+  max-width: 1400px; margin: 0 auto; align-items: start; }
+@media (max-width: 860px) { main { grid-template-columns: 1fr; } }
+section, .setup { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
+.setup { max-width: 640px; margin: 24px auto; padding: 18px; }
+.setup ol { padding-left: 20px; margin: 8px 0 14px; color: var(--muted); }
+.setup code { font-family: var(--mono); font-size: 13px; }
+.head { display: flex; justify-content: space-between; align-items: baseline; padding: 14px 16px; border-bottom: 1px solid var(--line); }
+.count { color: var(--muted); font-size: 13px; }
+form { display: flex; gap: 8px; padding: 12px 16px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+.setup form { padding: 0; border: 0; }
+input[type=text], input[type=url], input[type=password], textarea { flex: 1 1 160px; min-width: 0; padding: 8px 10px;
+  border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--ink); font: inherit; }
+textarea { resize: vertical; min-height: 38px; }
+button { font: inherit; cursor: pointer; padding: 8px 14px; border-radius: 6px; border: 1px solid var(--accent);
+  background: var(--accent); color: var(--accent-ink); }
+button.ghost { background: transparent; color: var(--accent); }
+button.del { background: transparent; border-color: transparent; color: var(--danger); padding: 4px 8px; }
+button:disabled { opacity: .5; cursor: default; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+ul { list-style: none; margin: 0; padding: 0; max-height: 62vh; overflow: auto; }
+li { display: flex; align-items: center; gap: 10px; padding: 10px 16px; border-bottom: 1px solid var(--line); }
+li:last-child { border-bottom: 0; }
+li.off .url { text-decoration: line-through; color: var(--muted); }
+.info { flex: 1; min-width: 0; }
+.url { font: 13px var(--mono); overflow-wrap: anywhere; }
+.note { color: var(--muted); font-size: 12.5px; }
+.empty { padding: 24px 16px; color: var(--muted); }
+#toast { position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%); padding: 10px 16px;
+  border-radius: 6px; background: var(--ink); color: var(--bg); max-width: 90vw; display: none; }
+#toast.err { background: var(--danger); color: #fff; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Blocklist</h1>
+  <div class="bar" id="bar" hidden>
+    <button id="rebuild" class="ghost">Atualizar lista agora</button>
+    <button id="logout" class="ghost">Terminar sessão</button>
+  </div>
+</header>
+
+<div class="setup" id="setup" hidden>
+  <h2>Ligar ao GitHub</h2>
+  <ol>
+    <li>GitHub → Settings → Developer settings → Fine-grained tokens → Generate new token.</li>
+    <li>Repository access: só <code>blocklist-auto</code>. Permissions: <code>Contents</code> e <code>Actions</code> em Read and write.</li>
+    <li>Cola o token aqui. Fica guardado apenas neste browser.</li>
+  </ol>
+  <form id="f-token">
+    <input type="password" id="token" placeholder="github_pat_..." autocomplete="off" required aria-label="Token do GitHub">
+    <input type="text" id="wf" placeholder="Ficheiro do workflow (ex: update.yml, opcional)" aria-label="Ficheiro do workflow">
+    <button>Entrar</button>
+  </form>
+</div>
+
+<main id="app" hidden>
+  <section aria-labelledby="t-src">
+    <div class="head"><h2 id="t-src">Listas de bloqueio</h2><span class="count" id="c-src"></span></div>
+    <form id="f-src">
+      <input type="url" id="src-url" placeholder="https://exemplo.com/lista.txt" required aria-label="URL da lista">
+      <input type="text" id="src-note" placeholder="Nota (opcional)" aria-label="Nota">
+      <button>Adicionar lista</button>
+    </form>
+    <ul id="l-src"></ul>
+  </section>
+
+  <section aria-labelledby="t-wl">
+    <div class="head"><h2 id="t-wl">Whitelist</h2><span class="count" id="c-wl"></span></div>
+    <form id="f-wl">
+      <textarea id="wl-domain" rows="1" placeholder="exemplo.com (um ou vários, separados por espaço ou linha)" required aria-label="Domínios"></textarea>
+      <button>Permitir</button>
+    </form>
+    <form onsubmit="return false">
+      <input type="text" id="wl-search" placeholder="Filtrar domínios" aria-label="Filtrar whitelist">
+    </form>
+    <ul id="l-wl"></ul>
+  </section>
+</main>
+<div id="toast" role="status"></div>
+
+<script>
+const OWNER = 'D34thSkull', REPO = 'blocklist-auto', BRANCH = 'main';
+const SOURCES_PATH = 'sources.txt', WL_PATH = 'whitelists/personal-whitelist.txt';
+const API = `https://api.github.com/repos/${OWNER}/${REPO}`;
+const $ = s => document.querySelector(s);
+const store = {
+  get: k => { try { return localStorage.getItem(k) || ''; } catch { return ''; } },
+  set: (k, v) => { try { v ? localStorage.setItem(k, v) : localStorage.removeItem(k); } catch {} }
+};
+let state = { sources: [], whitelist: [] };
+
+// ---------- lógica de domínios (igual ao blocklib.py) ----------
+const DOMAIN_RE = /^(?!-)[a-z0-9-]{1,63}(?<!-)(\.(?!-)[a-z0-9-]{1,63}(?<!-))+$/;
+const IPV4_RE = /^\d{1,3}(\.\d{1,3}){3}$/;
+function validDomain(d) {
+  return !!d && d.length <= 253 && DOMAIN_RE.test(d) && !IPV4_RE.test(d) && !/^\d+$/.test(d.split('.').pop());
+}
+function normalizeDomain(raw) {
+  let s = (raw || '').trim().toLowerCase();
+  if (!s || s[0] === '!' || s[0] === '#') return null;
+  if (s.includes('://')) { try { s = new URL(s).hostname; } catch { return null; } }
+  else {
+    s = s.replace(/^@@/, '').replace(/^\|\|/, '').split('$')[0].replace(/\^$/, '');
+    const parts = s.split(/\s+/); s = parts[parts.length - 1];
+    s = s.split('/')[0].split('?')[0];
+    if ((s.match(/:/g) || []).length === 1) s = s.split(':')[0];
+  }
+  s = s.replace(/^[*.]+/, '').replace(/\.$/, '').replace(/^www\./, '');
+  return validDomain(s) ? s : null;
+}
+const parseWhitelist = text => new Set(text.split(/\r?\n/).map(normalizeDomain).filter(Boolean));
+function formatWhitelist(set) {
+  const stamp = new Date().toISOString().replace('T', ' ').slice(0, 19) + ' GMT';
+  return ['! Personal Whitelist (Cleaned, Homogenized, and Sorted)', `! Last Updated: ${stamp}`, '',
+    ...[...set].sort()].join('\n') + '\n';
+}
+
+// ---------- sources.txt ----------
+const SRC_RE = /^(#\s*)?(https?:\/\/\S+)\s*(?:#\s*(.*))?$/;
+function parseSources(text) {
+  return text.split(/\r?\n/).flatMap(l => {
+    const m = SRC_RE.exec(l.trim());
+    return m ? [{ url: m[2], enabled: !m[1], note: (m[3] || '').trim() }] : [];
+  });
+}
+const fmtSource = (url, on, note) => (on ? '' : '#') + url + (note ? `  # ${note}` : '');
+function editSources(text, op, url, { note = '', enabled = true } = {}) {
+  const out = []; let found = false;
+  for (let line of text.split(/\r?\n/)) {
+    const m = SRC_RE.exec(line.trim());
+    if (m && m[2] === url) {
+      found = true;
+      if (op === 'remove') continue;
+      line = fmtSource(url, op === 'add' ? true : enabled, note || (m[3] || '').trim());
+    }
+    out.push(line);
+  }
+  while (out.length && out[out.length - 1] === '') out.pop();
+  if (!found && op === 'add') out.push(fmtSource(url, true, note));
+  return out.join('\n') + '\n';
+}
+function validSourceUrl(raw) {
+  const u = (raw || '').trim();
+  let p; try { p = new URL(u); } catch { throw new Error('URL inválido.'); }
+  if (p.protocol !== 'https:' || /\s/.test(u) || u.length > 500) throw new Error('O URL tem de ser https:// e sem espaços.');
+  return u;
+}
+
+// ---------- API do GitHub ----------
+const b64enc = s => { let b = ''; new TextEncoder().encode(s).forEach(c => b += String.fromCharCode(c)); return btoa(b); };
+const b64dec = s => new TextDecoder().decode(Uint8Array.from(atob(s), c => c.charCodeAt(0)));
+
+async function gh(method, path, body) {
+  const r = await fetch(API + path, { method, cache: 'no-store', headers: {
+    Authorization: 'Bearer ' + store.get('token'), Accept: 'application/vnd.github+json',
+    ...(body ? { 'Content-Type': 'application/json' } : {}) }, body: body ? JSON.stringify(body) : undefined });
+  if (r.status === 401) { const e = new Error('Token inválido ou expirado.'); e.auth = true; throw e; }
+  return r;
+}
+async function ghRead(path) {
+  const r = await gh('GET', `/contents/${path}?ref=${BRANCH}`);
+  if (r.status === 404) return { text: '', sha: null };
+  if (!r.ok) throw new Error(`Erro do GitHub (${r.status}) a ler ${path}.`);
+  const j = await r.json();
+  return { text: b64dec(j.content), sha: j.sha };
+}
+async function ghModify(path, transform, message) {
+  for (let i = 0; i < 3; i++) {
+    const { text, sha } = await ghRead(path);
+    const next = transform(text);
+    if (next === text) return false;
+    const r = await gh('PUT', `/contents/${path}`, { message, branch: BRANCH, content: b64enc(next), ...(sha ? { sha } : {}) });
+    if (r.status === 409 || r.status === 422) continue;
+    if (r.status === 403 || r.status === 404) throw new Error('Sem permissão de escrita. Confirma as permissões do token (Contents: Read and write).');
+    if (!r.ok) throw new Error(`Erro do GitHub (${r.status}) a gravar.`);
+    return true;
+  }
+  throw new Error('Conflito ao gravar, tenta outra vez.');
+}
+
+// ---------- interface ----------
+function toast(msg, err) {
+  const t = $('#toast'); t.textContent = msg; t.className = err ? 'err' : ''; t.style.display = 'block';
+  clearTimeout(toast.id); toast.id = setTimeout(() => t.style.display = 'none', 4500);
+}
+function showSetup(show) {
+  $('#setup').hidden = !show; $('#app').hidden = show; $('#bar').hidden = show;
+  $('#rebuild').hidden = !store.get('wf');
+}
+async function act(fn) {
+  try { toast(await fn()); await load(); }
+  catch (e) { if (e.auth) { store.set('token', ''); showSetup(true); } toast(e.message, true); }
+}
+function el(tag, props = {}, ...kids) { const n = Object.assign(document.createElement(tag), props); kids.forEach(k => n.append(k)); return n; }
+
+function renderSources() {
+  const ul = $('#l-src'); ul.replaceChildren();
+  $('#c-src').textContent = `${state.sources.filter(s => s.enabled).length} ativas de ${state.sources.length}`;
+  if (!state.sources.length) ul.append(el('li', { className: 'empty' }, 'Ainda não há listas. Adiciona a primeira acima.'));
+  state.sources.forEach(s => {
+    const cb = el('input', { type: 'checkbox', checked: s.enabled, title: 'Ativar ou desativar' });
+    cb.setAttribute('aria-label', 'Ativar ' + s.url);
+    cb.onchange = () => act(async () => {
+      await ghModify(SOURCES_PATH, t => editSources(t, 'set', s.url, { enabled: cb.checked }), 'Toggle source via web UI');
+      return cb.checked ? 'Lista ativada.' : 'Lista desativada.';
+    });
+    const info = el('div', { className: 'info' }, el('div', { className: 'url' }, s.url));
+    if (s.note) info.append(el('div', { className: 'note' }, s.note));
+    const del = el('button', { className: 'del', textContent: 'Remover' });
+    del.onclick = () => confirm('Remover esta lista?\n' + s.url) && act(async () => {
+      await ghModify(SOURCES_PATH, t => editSources(t, 'remove', s.url), 'Remove source via web UI');
+      return 'Lista removida.';
+    });
+    ul.append(el('li', { className: s.enabled ? '' : 'off' }, cb, info, del));
+  });
+}
+function renderWhitelist() {
+  const ul = $('#l-wl'); ul.replaceChildren();
+  const q = $('#wl-search').value.trim().toLowerCase();
+  const list = state.whitelist.filter(d => d.includes(q));
+  $('#c-wl').textContent = q ? `${list.length} de ${state.whitelist.length}` : `${state.whitelist.length} domínios`;
+  if (!list.length) ul.append(el('li', { className: 'empty' }, q ? 'Nenhum domínio corresponde ao filtro.' : 'A whitelist está vazia. Adiciona um domínio acima.'));
+  list.forEach(d => {
+    const del = el('button', { className: 'del', textContent: 'Remover' });
+    del.onclick = () => act(async () => {
+      await ghModify(WL_PATH, t => formatWhitelist(new Set([...parseWhitelist(t)].filter(x => x !== d))), `Remove ${d} from whitelist via web UI`);
+      return `${d} removido da whitelist.`;
+    });
+    ul.append(el('li', {}, el('div', { className: 'info url' }, d), del));
+  });
+}
+async function load() {
+  const [src, wl] = await Promise.all([ghRead(SOURCES_PATH), ghRead(WL_PATH)]);
+  state = { sources: parseSources(src.text), whitelist: [...parseWhitelist(wl.text)].sort() };
+  renderSources(); renderWhitelist();
+}
+
+$('#f-token').onsubmit = async e => {
+  e.preventDefault();
+  store.set('token', $('#token').value.trim()); store.set('wf', $('#wf').value.trim());
+  try { showSetup(false); await load(); $('#token').value = ''; }
+  catch (err) { store.set('token', ''); showSetup(true); toast(err.message, true); }
+};
+$('#logout').onclick = () => { store.set('token', ''); showSetup(true); };
+$('#f-src').onsubmit = e => { e.preventDefault(); act(async () => {
+  const url = validSourceUrl($('#src-url').value), note = $('#src-note').value.trim().slice(0, 100);
+  const changed = await ghModify(SOURCES_PATH, t => editSources(t, 'add', url, { note }), 'Add source via web UI');
+  $('#f-src').reset(); return changed ? 'Lista adicionada.' : 'A lista já estava ativa.';
+}); };
+$('#f-wl').onsubmit = e => { e.preventDefault(); act(async () => {
+  const items = $('#wl-domain').value.split(/[\s,;]+/).filter(Boolean);
+  const good = new Set(items.map(normalizeDomain).filter(Boolean));
+  const bad = items.filter(x => !normalizeDomain(x));
+  if (!good.size) throw new Error('Nenhum domínio válido encontrado.');
+  await ghModify(WL_PATH, t => formatWhitelist(new Set([...parseWhitelist(t), ...good])), `Add ${good.size} domain(s) to whitelist via web UI`);
+  $('#f-wl').reset();
+  return `${good.size} domínio(s) na whitelist.` + (bad.length ? ` Ignorados: ${bad.slice(0, 5).join(', ')}` : '');
+}); };
+$('#wl-search').oninput = renderWhitelist;
+$('#rebuild').onclick = () => act(async () => {
+  const r = await gh('POST', `/actions/workflows/${encodeURIComponent(store.get('wf'))}/dispatches`, { ref: BRANCH });
+  if (!r.ok) throw new Error(`Não foi possível iniciar o workflow (${r.status}). Confirma o nome do ficheiro e o trigger workflow_dispatch.`);
+  return 'Atualização iniciada. Demora cerca de um minuto.';
+});
+
+if (store.get('token')) { showSetup(false); act(async () => 'Sessão iniciada.'); } else showSetup(true);
+</script>
+</body>
+</html>
