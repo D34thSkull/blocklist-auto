@@ -1,5 +1,5 @@
 ! Title: Combined AdGuard Home Blocklist
-! Last Updated: 2026-11-05 16:50:32 GMT
+! Last Updated: 2026-11-05 16:53:13 GMT
 ! Added: 0 rules
 ! Removed: 0 rules
 ! Expires: 1 day
