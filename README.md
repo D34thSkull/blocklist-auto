@@ -14,7 +14,7 @@ O projeto reúne listas de bloqueio de anúncios, rastreadores e malware e produ
 ## Estrutura do repositório
 
 - `sources.txt` — URLs das listas de origem, uma por linha.
-- `whitelists/` — ficheiros de exceção, um por ficheiro.
+- `whitelists/` — urls de exceção, para não serem bloqueados.
 - `generate_combined_list.py` — script principal que descarrega, processa e escreve a lista final.
 - `combined-blocklist.txt` — output gerado pela execução do script.
 - `.github/workflows/generate_list.yml` — workflow do GitHub Actions para gerar a lista automaticamente.
