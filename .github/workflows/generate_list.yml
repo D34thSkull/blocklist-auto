@@ -1,37 +1,54 @@
-# .github/workflows/generate_list.yml
 name: Generate Combined Blocklist
 
 on:
   push:
     branches:
-      - main # Ou 'master'
-    paths: # Opcional: só corre se estes ficheiros/pastas mudarem
+      - main
+      - testing
+    paths:
       - 'sources.txt'
       - 'blocklists/custom/**'
       - 'whitelists/**'
       - 'generate_combined_list.py'
-  workflow_dispatch: # Permite executar manualmente o workflow
+      - '.github/workflows/generate_list.yml'
+  workflow_dispatch:
   schedule:
-    - cron: '0 0 * * *' # Corre uma vez por dia à meia-noite UTC
+    - cron: '0 0 * * *'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: generate-blocklist-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
 
     steps:
-    - uses: actions/checkout@v4
-    - name: Set up Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.x'
-    - name: Install dependencies
-      run: pip install requests
-    - name: Generate list
-      run: python generate_combined_list.py
-    - name: Commit and push if changes
-      run: |
-        git config user.name "GitHub Actions"
-        git config user.email "actions@github.com"
-        git add combined-blocklist.txt
-        git commit -m "🤖 Auto-generated combined blocklist (downloaded and consolidated)" || echo "No changes to commit"
-        git push origin main # Ou 'master'
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: python -m pip install --upgrade pip requests
+
+      - name: Generate list
+        run: python generate_combined_list.py
+
+      - name: Commit and push if changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add combined-blocklist.txt
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "🤖 Auto-generated combined blocklist"
+            git push origin "HEAD:${GITHUB_REF_NAME}"
+          fi
