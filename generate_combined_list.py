@@ -3,7 +3,6 @@ import ipaddress
 import os
 import re
 import tempfile
-import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -18,10 +17,11 @@ OUTPUT_FILE = BASE_DIR / "combined-blocklist.txt"
 MAX_RESPONSE_BYTES = 50 * 1024 * 1024
 MAX_WORKERS = 8
 LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$", re.IGNORECASE)
+USER_AGENT = "BlocklistAuto/1.0"
 
 
 def load_entries(filepath):
-    """Read non-empty, non-comment lines from a file."""
+    """Return non-empty, non-comment lines from a text file."""
     try:
         with open(filepath, encoding="utf-8") as file:
             return [
@@ -34,9 +34,9 @@ def load_entries(filepath):
 
 
 def normalize_domain(value):
-    """Return a normalized domain or None if invalid."""
+    """Return a normalized domain, or None if the value is invalid."""
     value = value.strip().lower().rstrip(".")
-    if not value or len(value) > 253 or "/" in value or " " in value:
+    if not value or len(value) > 253 or "/" in value or any(char.isspace() for char in value):
         return None
 
     if value.startswith("||"):
@@ -57,12 +57,11 @@ def normalize_domain(value):
     labels = value.split(".")
     if len(labels) < 2 or any(not LABEL_RE.fullmatch(label) for label in labels):
         return None
-
     return value
 
 
 def parse_rule(raw_line):
-    """Extract (domain, type) from a common blocklist rule."""
+    """Extract (domain, rule type) entries from common blocklist formats."""
     line = raw_line.strip()
     if not line or line.startswith(("#", "!", "/", "[")):
         return []
@@ -95,11 +94,11 @@ def parse_rule(raw_line):
 
 
 def download_file(url, destination):
-    """Download a source to disk with a size cap."""
+    """Download a source to a temporary file with a decompressed size cap."""
     try:
         with requests.get(
             url,
-            headers={"User-Agent": "BlocklistAuto/1.0"},
+            headers={"User-Agent": USER_AGENT},
             stream=True,
             timeout=(5, 20),
         ) as response:
@@ -126,6 +125,7 @@ def download_file(url, destination):
 
 
 def read_blocklist_file(filepath):
+    """Parse a blocklist file into blocked and exception domain sets."""
     blocked = set()
     exceptions = set()
 
@@ -136,20 +136,48 @@ def read_blocklist_file(filepath):
                     exceptions.add(domain)
                 else:
                     blocked.add(domain)
-
     return blocked, exceptions
 
 
+def load_whitelist():
+    """Load whitelist entries; every valid domain entry is an allow rule."""
+    whitelist = set()
+    if not WHITELISTS_DIR.is_dir():
+        return whitelist
+
+    for filepath in sorted(WHITELISTS_DIR.glob("*.txt")):
+        with open(filepath, encoding="utf-8", errors="replace") as file:
+            for line in file:
+                for domain, _ in parse_rule(line):
+                    whitelist.add(domain)
+    return whitelist
+
+
 def is_whitelisted(domain, whitelist):
-    """Whitelist a domain and each of its subdomains."""
+    """Check the domain and its parent domains in O(number of labels)."""
+    labels = domain.split(".")
     return any(
-        domain == allowed or domain.endswith("." + allowed)
-        for allowed in whitelist
+        ".".join(labels[index:]) in whitelist
+        for index in range(len(labels) - 1)
     )
 
 
+def remove_redundant_subdomains(domains):
+    """Drop blocked subdomains already covered by a blocked parent domain."""
+    optimized = set()
+    for domain in sorted(domains, key=lambda value: (value.count("."), value)):
+        labels = domain.split(".")
+        has_blocked_parent = any(
+            ".".join(labels[index:]) in optimized
+            for index in range(1, len(labels))
+        )
+        if not has_blocked_parent:
+            optimized.add(domain)
+    return optimized
+
+
 def write_output(blocked_domains, whitelist_domains):
-    """Create the output list atomically."""
+    """Atomically replace the generated list, preserving exceptions."""
     fd, temporary_path = tempfile.mkstemp(
         prefix=".combined-blocklist-",
         dir=BASE_DIR,
@@ -157,6 +185,8 @@ def write_output(blocked_domains, whitelist_domains):
     )
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as output:
+            # Keep headers deterministic so unchanged content does not cause
+            # a new generated commit solely because the date changed.
             output.write("! Title: Combined AdGuard Home Blocklist\n")
             output.write("! Expires: 1 day\n")
             output.write("! Homepage: https://github.com/D34thSkull/blocklist-auto\n")
@@ -164,10 +194,8 @@ def write_output(blocked_domains, whitelist_domains):
 
             for domain in sorted(whitelist_domains):
                 output.write(f"@@||{domain}^\n")
-
             for domain in sorted(blocked_domains):
-                if not is_whitelisted(domain, whitelist_domains):
-                    output.write(f"||{domain}^\n")
+                output.write(f"||{domain}^\n")
 
         os.replace(temporary_path, OUTPUT_FILE)
     except Exception:
@@ -180,55 +208,42 @@ def write_output(blocked_domains, whitelist_domains):
 
 def main():
     print("[INFO] A iniciar a atualização das blocklists...")
-
     sources = list(dict.fromkeys(load_entries(SOURCES_FILE)))
     if not sources:
         raise SystemExit("[ERRO] Nenhuma fonte encontrada em sources.txt")
 
-    whitelist_domains = set()
-    if WHITELISTS_DIR.is_dir():
-        for filepath in sorted(WHITELISTS_DIR.glob("*.txt")):
-            for line in load_entries(filepath):
-                for domain, rule_type in parse_rule(line):
-                    if rule_type == "whitelist":
-                        whitelist_domains.add(domain)
-                    else:
-                        whitelist_domains.add(domain)
+    whitelist_domains = load_whitelist()
+    source_results = []
 
-    all_blocked = set()
-    downloaded_files = []
-
+    # Downloads are isolated in a temporary directory, so stale files can
+    # never silently be included in the output.
     with tempfile.TemporaryDirectory(prefix=".blocklists-", dir=BASE_DIR) as temp_dir:
         temp_dir = Path(temp_dir)
-        futures = []
+        future_to_source = {}
 
         with ThreadPoolExecutor(max_workers=min(MAX_WORKERS, len(sources))) as executor:
-            for url in sources:
-                digest = hashlib.sha256(url.encode("utf-8")).hexdigest()
-                destination = temp_dir / f"{digest}.txt"
-                futures.append(executor.submit(download_file, url, destination))
+            for index, url in enumerate(sources):
+                destination = temp_dir / f"source-{index}.txt"
+                future = executor.submit(download_file, url, destination)
+                future_to_source[future] = (url, destination)
 
-            for future in as_completed(futures):
-                result = future.result()
-                # No result; download already logged failure.
-                if result is False:
-                    continue
+            failed_sources = []
+            for future in as_completed(future_to_source):
+                url, destination = future_to_source[future]
+                if future.result():
+                    source_results.append((url, destination))
+                else:
+                    failed_sources.append(url)
 
-        for url in sources:
-            digest = hashlib.sha256(url.encode("utf-8")).hexdigest()
-            destination = temp_dir / f"{digest}.txt"
-            if not destination.exists():
-                print(f"[AVISO] Falha ao descarregar: {url}")
-                continue
-            downloaded_files.append(destination)
-
-        if not downloaded_files:
+        if failed_sources:
+            details = "\n".join(f"  - {url}" for url in failed_sources)
             raise SystemExit(
-                "[ERRO] Nenhuma fonte foi descarregada; "
-                "o ficheiro existente foi preservado."
+                "[ERRO] Um ou mais downloads falharam; a lista existente foi "
+                f"preservada. Fontes com erro:\n{details}"
             )
 
-        for filepath in downloaded_files:
+        all_blocked = set()
+        for _, filepath in sorted(source_results):
             blocked, exceptions = read_blocklist_file(filepath)
             all_blocked.update(blocked)
             whitelist_domains.update(exceptions)
@@ -239,17 +254,19 @@ def main():
             all_blocked.update(blocked)
             whitelist_domains.update(exceptions)
 
-    final_blocked = {
-        domain for domain in all_blocked
+    filtered_domains = {
+        domain
+        for domain in all_blocked
         if not is_whitelisted(domain, whitelist_domains)
     }
+    final_domains = remove_redundant_subdomains(filtered_domains)
 
-    write_output(final_blocked, whitelist_domains)
+    write_output(final_domains, whitelist_domains)
 
-    print(f"[INFO] Fontes descarregadas: {len(downloaded_files)}/{len(sources)}")
+    print(f"[INFO] Fontes descarregadas: {len(source_results)}/{len(sources)}")
     print(f"[INFO] Domínios recolhidos: {len(all_blocked)}")
     print(f"[INFO] Domínios na whitelist: {len(whitelist_domains)}")
-    print(f"[SUCESSO] Domínios finais: {len(final_blocked)}")
+    print(f"[SUCESSO] Domínios finais: {len(final_domains)}")
     print(f"[SUCESSO] Ficheiro gerado: {OUTPUT_FILE}")
 
 
