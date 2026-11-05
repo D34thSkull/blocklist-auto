@@ -176,8 +176,38 @@ def remove_redundant_subdomains(domains):
     return optimized
 
 
-def write_output(blocked_domains, whitelist_domains):
-    """Atomically replace the generated list, preserving exceptions."""
+def required_exceptions(blocked_domains, whitelist_domains):
+    """Return only whitelist rules needed to override an active parent block."""
+    required = set()
+
+    for allowed_domain in whitelist_domains:
+        labels = allowed_domain.split(".")
+        # A whitelist entry needs an AdGuard exception only if a block rule
+        # matches one of its parent domains. The domain itself and its
+        # descendants are already excluded during block filtering.
+        for index in range(1, len(labels)):
+            parent_domain = ".".join(labels[index:])
+            if parent_domain in blocked_domains:
+                required.add(allowed_domain)
+                break
+
+    # An exception for a parent also protects its subdomains, so omit
+    # redundant, more specific exception rules.
+    compact = set()
+    for domain in sorted(required, key=lambda value: (value.count("."), value)):
+        labels = domain.split(".")
+        has_exception_parent = any(
+            ".".join(labels[index:]) in compact
+            for index in range(1, len(labels))
+        )
+        if not has_exception_parent:
+            compact.add(domain)
+
+    return compact
+
+
+def write_output(blocked_domains, exceptions):
+    """Atomically replace the generated list, preserving required exceptions."""
     fd, temporary_path = tempfile.mkstemp(
         prefix=".combined-blocklist-",
         dir=BASE_DIR,
@@ -192,7 +222,7 @@ def write_output(blocked_domains, whitelist_domains):
             output.write("! Homepage: https://github.com/D34thSkull/blocklist-auto\n")
             output.write("! Version: 1.0\n!\n")
 
-            for domain in sorted(whitelist_domains):
+            for domain in sorted(exceptions):
                 output.write(f"@@||{domain}^\n")
             for domain in sorted(blocked_domains):
                 output.write(f"||{domain}^\n")
@@ -260,12 +290,14 @@ def main():
         if not is_whitelisted(domain, whitelist_domains)
     }
     final_domains = remove_redundant_subdomains(filtered_domains)
+    exceptions = required_exceptions(final_domains, whitelist_domains)
 
-    write_output(final_domains, whitelist_domains)
+    write_output(final_domains, exceptions)
 
     print(f"[INFO] Fontes descarregadas: {len(source_results)}/{len(sources)}")
     print(f"[INFO] Domínios recolhidos: {len(all_blocked)}")
     print(f"[INFO] Domínios na whitelist: {len(whitelist_domains)}")
+    print(f"[INFO] Exceções de whitelist necessárias: {len(exceptions)}")
     print(f"[SUCESSO] Domínios finais: {len(final_domains)}")
     print(f"[SUCESSO] Ficheiro gerado: {OUTPUT_FILE}")
 
