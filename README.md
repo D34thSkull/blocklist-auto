@@ -17,7 +17,7 @@ O projeto reúne listas de bloqueio de anúncios, rastreadores e malware e produ
 - `whitelists/` - URLs de exceção, para não serem bloqueados.
 - `generate_combined_list.py` - script principal que descarrega, processa e escreve a lista final.
 - `combined-blocklist.txt` - output gerado pela execução do script.
-- `.github/workflows/generate_list.yml` — workflow do GitHub Actions para gerar a lista automaticamente.
+- `.github/workflows/generate_list.yml` - workflow do GitHub Actions para gerar a lista automaticamente.
 
 ## Como funciona
 
