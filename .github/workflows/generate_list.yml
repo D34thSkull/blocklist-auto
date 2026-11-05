@@ -7,7 +7,6 @@ on:
       - testing
     paths:
       - 'sources.txt'
-      - 'blocklists/custom/**'
       - 'whitelists/**'
       - 'generate_combined_list.py'
       - '.github/workflows/generate_list.yml'
