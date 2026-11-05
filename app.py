@@ -1,128 +1,191 @@
-import os
-import json
-import requests
+"""Interface web para gerir sources.txt e a whitelist pessoal.
+Variáveis de ambiente: GITHUB_TOKEN, ADMIN_PASSWORD (obrigatórias),
+ADMIN_USER, REPO_OWNER, REPO_NAME, BRANCH, WORKFLOW_FILE (opcionais)."""
 import base64
+import hmac
+import os
 import re
-import time
+from functools import wraps
 from urllib.parse import urlparse
-from flask import Flask, request, jsonify, render_template
+
+import requests
+from flask import Flask, jsonify, render_template, request
+
+from blocklib import (edit_sources, format_whitelist, normalize_domain,
+                      parse_sources, parse_whitelist)
 
 app = Flask(__name__)
 
-# --- Funções de Ajuda (Copiadas do teu script clean_whitelist_duplicates.py) ---
-# Certifica-te que estas funções estão atualizadas com a tua última versão!
-def clean_and_normalize_domain(domain_line):
-    domain = domain_line.strip().lower()
-    if domain.startswith(('http://', 'https://')):
-        try:
-            parsed_url = urlparse(domain)
-            domain = parsed_url.netloc
-            if not domain: return None
-        except ValueError: return None
-    if domain.startswith('@@||') and domain.endswith('^'): domain = domain[4:-1]
-    elif domain.startswith('||') and domain.endswith('^'): domain = domain[2:-1]
-    elif domain.startswith(('0.0.0.0 ', '127.0.0.1 ')):
-        parts = domain.split(' ', 1)
-        if len(parts) > 1: domain = parts[1].strip()
-        else: return None
-    if domain.startswith('www.'): domain = domain[4:]
-    if domain.endswith('/'): domain = domain[:-1]
-    domain_pattern = re.compile(
-        r"^(?!-)[a-z0-9-]{1,63}(?<!-)(\.[a-z0-9-]{1,63}(?<!-))*(?<!\d)\.[a-z]{2,63}$"
-    )
-    if not domain or domain.startswith(('#', '!')) or domain.startswith('/') or \
-       ' ' in domain or not domain_pattern.match(domain): return None
-    return domain
-# --- Fim das Funções de Ajuda ---
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
+ADMIN_USER = os.getenv("ADMIN_USER", "admin")
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD")
+REPO_OWNER = os.getenv("REPO_OWNER", "D34thSkull")
+REPO_NAME = os.getenv("REPO_NAME", "blocklist-auto")
+BRANCH = os.getenv("BRANCH", "main")
+WORKFLOW_FILE = os.getenv("WORKFLOW_FILE")  # ex: "update.yml" (opcional)
+SOURCES_PATH = "sources.txt"
+WHITELIST_PATH = "whitelists/personal-whitelist.txt"
 
-# Configurações do GitHub (Coloca isto num ficheiro .env ou variáveis de ambiente para produção!)
-# Para simplificar aqui, vamos ler do ambiente ou usar placeholders.
-# É ALTAMENTE RECOMENDADO USAR VARIÁVEIS DE AMBIENTE OU UM FICHEIRO .env
-GITHUB_TOKEN = os.getenv('GITHUB_TOKEN')
-REPO_OWNER = 'D34thSkull' # <--- SUBSTITUI ISTO PELO TEU UTILIZADOR DO GITHUB
-REPO_NAME = 'blocklist-auto' # <--- SUBSTITUI ISTO PELO NOME DO TEU REPOSITÓRIO
-FILE_PATH = 'whitelists/personal-whitelist.txt'
-BRANCH = 'main' # <--- SUBSTITUI ISTO PELA TUA BRANCH PRINCIPAL (ex: 'main' ou 'master')
+API = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}"
+HEADERS = {"Authorization": f"Bearer {GITHUB_TOKEN}",
+           "Accept": "application/vnd.github+json"}
 
-@app.route('/')
+
+class ApiError(Exception):
+    def __init__(self, message, status=400):
+        super().__init__(message)
+        self.status = status
+
+
+@app.errorhandler(ApiError)
+def _api_error(e):
+    return jsonify(ok=False, message=str(e)), e.status
+
+
+@app.errorhandler(requests.HTTPError)
+def _gh_error(e):
+    code = e.response.status_code
+    return jsonify(ok=False, message=f"Erro da API do GitHub ({code})."), 502
+
+
+def require_auth(f):
+    """Autenticação HTTP Basic. Sem isto qualquer pessoa podia mexer nas listas."""
+    @wraps(f)
+    def wrapper(*a, **kw):
+        if not ADMIN_PASSWORD or not GITHUB_TOKEN:
+            return jsonify(ok=False, message="Servidor sem ADMIN_PASSWORD/GITHUB_TOKEN."), 503
+        auth = request.authorization
+        ok = (auth and auth.username is not None and auth.password is not None
+              and hmac.compare_digest(auth.username, ADMIN_USER)
+              and hmac.compare_digest(auth.password, ADMIN_PASSWORD))
+        if not ok:
+            return ("Autenticação necessária", 401,
+                    {"WWW-Authenticate": 'Basic realm="Blocklist"'})
+        return f(*a, **kw)
+    return wrapper
+
+
+# ---------- GitHub ----------
+def gh_read(path):
+    r = requests.get(f"{API}/contents/{path}", headers=HEADERS,
+                     params={"ref": BRANCH}, timeout=15)
+    if r.status_code == 404:
+        return "", None
+    r.raise_for_status()
+    j = r.json()
+    return base64.b64decode(j["content"]).decode("utf-8"), j["sha"]
+
+
+def gh_modify(path, transform, message):
+    """Lê, aplica transform(texto) e grava. Repete se houver conflito de versão."""
+    for _ in range(3):
+        text, sha = gh_read(path)
+        new = transform(text)
+        if new == text:
+            return False
+        payload = {"message": message, "branch": BRANCH,
+                   "content": base64.b64encode(new.encode()).decode()}
+        if sha:
+            payload["sha"] = sha
+        r = requests.put(f"{API}/contents/{path}", headers=HEADERS, json=payload, timeout=15)
+        if r.status_code in (409, 422):
+            continue
+        r.raise_for_status()
+        return True
+    raise ApiError("Conflito ao gravar no GitHub, tenta outra vez.", 409)
+
+
+def valid_source_url(raw):
+    u = (raw or "").strip()
+    p = urlparse(u)
+    if len(u) > 500 or re.search(r"\s", u) or p.scheme != "https" or not p.hostname:
+        raise ApiError("O URL tem de ser https:// e não pode ter espaços.")
+    return u
+
+
+# ---------- rotas ----------
+@app.route("/")
+@require_auth
 def index():
-    # Serve a página HTML. O Flask procura por templates na pasta 'templates'
-    return render_template('index.html')
+    return render_template("index.html")
 
-@app.route('/add_to_whitelist', methods=['POST'])
-def add_to_whitelist():
-    if not GITHUB_TOKEN:
-        return jsonify({'status': 'error', 'message': 'GITHUB_TOKEN not configured on server.'}), 500
 
-    data = request.get_json()
-    new_domain_raw = data.get('domain')
+@app.get("/api/state")
+@require_auth
+def state():
+    sources = parse_sources(gh_read(SOURCES_PATH)[0])
+    whitelist = sorted(parse_whitelist(gh_read(WHITELIST_PATH)[0]))
+    return jsonify(ok=True, sources=sources, whitelist=whitelist,
+                   can_rebuild=bool(WORKFLOW_FILE))
 
-    if not new_domain_raw:
-        return jsonify({'status': 'error', 'message': 'Dominio é obrigatório.'}), 400
 
-    normalized_domain = clean_and_normalize_domain(new_domain_raw)
+@app.post("/api/sources")
+@require_auth
+def add_source():
+    d = request.get_json(silent=True) or {}
+    url, note = valid_source_url(d.get("url")), (d.get("note") or "").strip()[:100]
+    changed = gh_modify(SOURCES_PATH, lambda t: edit_sources(t, "add", url, note=note),
+                        f"Add source {urlparse(url).path.rsplit('/', 1)[-1]} via web UI")
+    return jsonify(ok=True, message="Lista adicionada." if changed else "A lista já estava ativa.")
 
-    if not normalized_domain:
-        return jsonify({'status': 'error', 'message': f'Formato de domínio inválido ou não suportado: {new_domain_raw}'}), 400
 
-    headers = {
-        'Authorization': f'token {GITHUB_TOKEN}',
-        'Accept': 'application/vnd.github.v3+json'
-    }
+@app.patch("/api/sources")
+@require_auth
+def toggle_source():
+    d = request.get_json(silent=True) or {}
+    url, enabled = valid_source_url(d.get("url")), bool(d.get("enabled"))
+    gh_modify(SOURCES_PATH, lambda t: edit_sources(t, "set", url, enabled=enabled),
+              f"{'Enable' if enabled else 'Disable'} source via web UI")
+    return jsonify(ok=True, message="Lista ativada." if enabled else "Lista desativada.")
 
-    try:
-        # 1. Obter o conteúdo atual do ficheiro
-        get_file_url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/{FILE_PATH}?ref={BRANCH}"
-        file_response = requests.get(get_file_url, headers=headers)
-        file_response.raise_for_status()
-        file_data = file_response.json()
-        
-        current_content_b64 = file_data['content']
-        current_content = base64.b64decode(current_content_b64).decode('utf-8')
-        sha = file_data['sha']
 
-        # 2. Processar o conteúdo e adicionar o novo domínio
-        existing_domains = set()
-        for line in current_content.splitlines():
-            domain = clean_and_normalize_domain(line)
-            if domain:
-                existing_domains.add(domain)
+@app.delete("/api/sources")
+@require_auth
+def remove_source():
+    url = valid_source_url((request.get_json(silent=True) or {}).get("url"))
+    gh_modify(SOURCES_PATH, lambda t: edit_sources(t, "remove", url),
+              "Remove source via web UI")
+    return jsonify(ok=True, message="Lista removida.")
 
-        if normalized_domain in existing_domains:
-            return jsonify({'status': 'success', 'message': f'"{normalized_domain}" já existe na whitelist.'}), 200
 
-        existing_domains.add(normalized_domain)
-        updated_content_lines = sorted(list(existing_domains))
-        
-        # Adiciona cabeçalho como no teu script clean_personal_whitelist
-        updated_content_lines.insert(0, '') # Linha vazia
-        updated_content_lines.insert(0, f"! Last Updated: {time.strftime('%Y-%m-%d %H:%M:%S GMT', time.gmtime())}")
-        updated_content_lines.insert(0, "! Personal Whitelist (Cleaned, Homogenized, and Sorted)")
+@app.post("/api/whitelist")
+@require_auth
+def add_whitelist():
+    raw = (request.get_json(silent=True) or {}).get("domain") or ""
+    items = [x for x in re.split(r"[\s,;]+", raw) if x]
+    good = {d for d in map(normalize_domain, items) if d}
+    bad = [x for x in items if not normalize_domain(x)]
+    if not good:
+        raise ApiError("Nenhum domínio válido encontrado.")
+    gh_modify(WHITELIST_PATH, lambda t: format_whitelist(parse_whitelist(t) | good),
+              f"Add {len(good)} domain(s) to whitelist via web UI")
+    msg = f"{len(good)} domínio(s) na whitelist."
+    if bad:
+        msg += f" Ignorados: {', '.join(bad[:5])}"
+    return jsonify(ok=True, message=msg)
 
-        updated_content = '\n'.join(updated_content_lines) + '\n' # Adiciona uma nova linha no final
-        updated_content_b64 = base64.b64encode(updated_content.encode('utf-8')).decode('utf-8')
 
-        # 3. Fazer o PUT para atualizar o ficheiro
-        update_file_url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/{FILE_PATH}"
-        update_payload = {
-            'message': f'Add {normalized_domain} to whitelist via Raspberry Pi web UI',
-            'content': updated_content_b64,
-            'sha': sha,
-            'branch': BRANCH
-        }
-        update_response = requests.put(update_file_url, headers=headers, json=update_payload)
-        update_response.raise_for_status()
+@app.delete("/api/whitelist")
+@require_auth
+def remove_whitelist():
+    domain = normalize_domain((request.get_json(silent=True) or {}).get("domain"))
+    if not domain:
+        raise ApiError("Domínio inválido.")
+    gh_modify(WHITELIST_PATH, lambda t: format_whitelist(parse_whitelist(t) - {domain}),
+              f"Remove {domain} from whitelist via web UI")
+    return jsonify(ok=True, message=f"{domain} removido da whitelist.")
 
-        return jsonify({'status': 'success', 'message': f'"{normalized_domain}" adicionado à whitelist com sucesso.'}), 200
 
-    except requests.exceptions.HTTPError as e:
-        print(f"GitHub API Error: {e.response.status_code} - {e.response.text}")
-        return jsonify({'status': 'error', 'message': f'Erro da API GitHub: {e.response.status_code} - {e.response.text}'}), e.response.status_code
-    except Exception as e:
-        print(f"Internal Server Error: {e}")
-        return jsonify({'status': 'error', 'message': f'Ocorreu um erro interno: {str(e)}'}), 500
+@app.post("/api/rebuild")
+@require_auth
+def rebuild():
+    if not WORKFLOW_FILE:
+        raise ApiError("WORKFLOW_FILE não está configurado.", 400)
+    r = requests.post(f"{API}/actions/workflows/{WORKFLOW_FILE}/dispatches",
+                      headers=HEADERS, json={"ref": BRANCH}, timeout=15)
+    r.raise_for_status()
+    return jsonify(ok=True, message="Atualização iniciada. Demora cerca de um minuto.")
 
-if __name__ == '__main__':
-    # Em produção, usarias Gunicorn ou similar. Para testar:
-    # app.run(host='0.0.0.0', port=5000, debug=True)
-    pass
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000)

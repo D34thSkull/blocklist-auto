@@ -1,273 +1,137 @@
-import os
-import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
+#!/usr/bin/env python3
+"""Consolida várias blocklists numa só lista para o AdGuard Home."""
 import glob
+import hashlib
+import os
+import sys
 import time
-import re
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
+from itertools import islice
 
-# ---------------------------------------------------------------------------
-# Sessão HTTP partilhada com retries automáticos (backoff exponencial)
-# ---------------------------------------------------------------------------
-def build_session():
-    session = requests.Session()
-    retries = Retry(
-        total=3,                      # até 3 tentativas extra por fonte
-        backoff_factor=1,             # 1s, 2s, 4s...
-        status_forcelist=[429, 500, 502, 503, 504],
-        allowed_methods=["GET"],
-    )
-    adapter = HTTPAdapter(max_retries=retries, pool_maxsize=10)
-    session.mount("https://", adapter)
-    session.mount("http://", adapter)
-    return session
+import requests
+
+from blocklib import normalize_domain, parse_rule, parse_sources, suffixes
+
+SOURCES_FILE = "sources.txt"
+DOWNLOAD_DIR = "blocklists/downloaded"
+CUSTOM_DIR = "blocklists/custom"
+WHITELIST_DIR = "whitelists"
+OUTPUT_FILE = "combined-blocklist.txt"
+HOMEPAGE = "https://github.com/D34thSkull/blocklist-auto"
 
 
-SESSION = build_session()
-MAX_CONTENT_BYTES = 50 * 1024 * 1024  # 50MB - limite de segurança por ficheiro
+def cache_path(url):
+    name = os.path.basename(url.split("?")[0]) or "list"
+    return os.path.join(DOWNLOAD_DIR, f"{hashlib.sha1(url.encode()).hexdigest()[:8]}-{name}")
 
 
-def download_file(url, destination_path):
-    """Descarrega um ficheiro de uma URL para um caminho de destino.
-
-    Inclui retries automáticos (via SESSION), verificação básica de
-    Content-Type e limite de tamanho para evitar ficheiros maliciosos
-    ou respostas de erro disfarçadas de sucesso (ex: páginas HTML 404).
-    """
-    try:
-        print(f"A descarregar: {url} para {destination_path}")
-        response = SESSION.get(url, stream=True, timeout=15)
-        response.raise_for_status()
-
-        content_type = response.headers.get("Content-Type", "").lower()
-        if "text/html" in content_type:
-            print(f"Aviso: {url} devolveu Content-Type HTML — a ignorar (provável página de erro).")
-            return False
-
-        total = 0
-        with open(destination_path, "wb") as f:
-            for chunk in response.iter_content(chunk_size=8192):
-                total += len(chunk)
-                if total > MAX_CONTENT_BYTES:
-                    print(f"Erro: {url} excedeu o limite de tamanho ({MAX_CONTENT_BYTES} bytes) — a abortar.")
-                    f.close()
-                    os.remove(destination_path)
-                    return False
-                f.write(chunk)
-
-        if total == 0:
-            print(f"Aviso: {url} devolveu ficheiro vazio.")
-            os.remove(destination_path)
-            return False
-
-        print(f"Descarregado com sucesso: {url} ({total} bytes)")
-        return True
-    except requests.exceptions.RequestException as e:
-        print(f"Erro ao descarregar {url}: {e}")
-        return False
+def download(url):
+    """Devolve (url, caminho, estado) com estado 'ok', 'cache' (usou cópia antiga) ou 'falhou'."""
+    dest = cache_path(url)
+    for attempt in range(1, 4):
+        try:
+            r = requests.get(url, timeout=30, headers={"User-Agent": "blocklist-auto/2.0"})
+            r.raise_for_status()
+            with open(dest + ".tmp", "wb") as f:
+                f.write(r.content)
+            os.replace(dest + ".tmp", dest)  # escrita atómica: nunca deixa ficheiros a meio
+            return url, dest, "ok"
+        except requests.RequestException as e:
+            print(f"  tentativa {attempt}/3 falhou ({url}): {e}")
+            time.sleep(2 * attempt)
+    return url, dest, "cache" if os.path.exists(dest) else "falhou"
 
 
-def download_all(urls, destination_dir, max_workers=8):
-    """Descarrega várias URLs em paralelo e devolve estatísticas."""
-    results = {}
-
-    def _task(url):
-        filename = os.path.basename(url.split("?")[0])
-        if not filename.endswith(".txt"):
-            filename += ".txt"
-        destination_path = os.path.join(destination_dir, filename)
-        ok = download_file(url, destination_path)
-        return url, ok
-
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {executor.submit(_task, url): url for url in urls}
-        for future in as_completed(futures):
-            url, ok = future.result()
-            results[url] = ok
-
-    return results
+def read_rules(path):
+    with open(path, encoding="utf-8", errors="ignore") as f:
+        for line in f:
+            yield from parse_rule(line)
 
 
-# ---------------------------------------------------------------------------
-# Parsing / normalização de domínios (sem alterações funcionais)
-# ---------------------------------------------------------------------------
-DOMAIN_REGEX = re.compile(
-    r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*\.[a-z]{2,}$"
-)
+def load_user_whitelist():
+    domains = set()
+    for path in glob.glob(os.path.join(WHITELIST_DIR, "*.txt")):
+        with open(path, encoding="utf-8", errors="ignore") as f:
+            domains |= {d for d in map(normalize_domain, f) if d}
+    return domains
 
 
-def clean_and_normalize_domain(domain_line):
-    """Limpa e classifica uma linha de uma blocklist.
+def covered_by(domain, pool):
+    """True se o domínio ou qualquer domínio-pai estiver em 'pool'."""
+    return any(s in pool for s in suffixes(domain))
 
-    Devolve (domínio_ou_None, tipo) onde tipo é 'block', 'whitelist' ou 'invalid'.
-    """
-    domain = domain_line.strip().lower()
 
-    if domain.startswith("@@||") and domain.endswith("^"):
-        return domain[4:-1], "whitelist"
+def generate():
+    os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
-    elif domain.startswith("||") and domain.endswith("^"):
-        return domain[2:-1], "block"
+    # 1. Fontes ativas (as desativadas/removidas deixam de contar, mesmo que haja cache antiga)
+    urls = []
+    if os.path.exists(SOURCES_FILE):
+        with open(SOURCES_FILE, encoding="utf-8") as f:
+            urls = [s["url"] for s in parse_sources(f.read()) if s["enabled"]]
+    urls = list(dict.fromkeys(urls))
 
-    elif domain.startswith(("0.0.0.0 ", "127.0.0.1 ")):
-        parts = domain.split(" ", 1)
-        if len(parts) > 1:
-            domain_part = parts[1].strip()
-            if DOMAIN_REGEX.match(domain_part):
-                return domain_part, "block"
+    print(f"A descarregar {len(urls)} listas em paralelo...")
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        results = list(pool.map(download, urls))
+
+    keep = {path for _, path, status in results if status != "falhou"}
+    for old in glob.glob(os.path.join(DOWNLOAD_DIR, "*")):
+        if old not in keep:
+            os.remove(old)
+
+    # 2. Ler regras
+    blocked, upstream_allow = set(), set()
+    files = [(u, p, s) for u, p, s in results if s != "falhou"]
+    files += [(p, p, "custom") for p in glob.glob(os.path.join(CUSTOM_DIR, "*.txt"))]
+    for url, path, status in files:
+        n = 0
+        for domain, kind in read_rules(path):
+            if kind == "block":
+                blocked.add(domain)
+                n += 1
             else:
-                return None, "invalid"
-        return None, "invalid"
+                upstream_allow.add(domain)
+        note = " (cache antiga)" if status == "cache" else ""
+        print(f"  {n:>8} regras  {url}{note}")
+    for url, _, status in results:
+        if status == "falhou":
+            print(f"  AVISO: {url} falhou e não há cache, foi ignorada")
 
-    elif DOMAIN_REGEX.match(domain):
-        return domain, "block"
+    if not blocked:
+        print("Erro: nenhum domínio lido. A lista anterior foi mantida.")
+        return 1
 
-    if not domain or domain.startswith(("#", "!")) or domain.startswith("/") or "." not in domain or " " in domain:
-        return None, "invalid"
+    # 3. Whitelist: remove o domínio e os seus subdomínios (igual ao @@||dominio^ do AdGuard)
+    user_allow = load_user_whitelist()
+    allow_all = user_allow | upstream_allow
+    kept = {d for d in blocked if not covered_by(d, allow_all)}
 
-    return None, "invalid"
+    # 4. Remove subdomínios redundantes (ads.exemplo.com já é coberto por exemplo.com)
+    final = {d for d in kept if not any(p in kept for p in islice(suffixes(d), 1, None))}
 
+    # 5. Se o utilizador faz whitelist de um subdomínio cujo pai está bloqueado,
+    #    emite uma exceção explícita para o AdGuard
+    exceptions = sorted(w for w in user_allow
+                        if any(p in final for p in islice(suffixes(w), 1, None)))
 
-# ---------------------------------------------------------------------------
-# Pipeline principal
-# ---------------------------------------------------------------------------
-def remove_redundant_subdomains(domains):
-    """Remove subdomínios cujo domínio "pai" já está na lista.
-
-    Se 'tracker.com' está na lista, bloqueá-lo já bloqueia
-    'ads.tracker.com', 'x.ads.tracker.com', etc. — por isso esses
-    subdomínios são redundantes e podem ser removidos para reduzir
-    o tamanho final da lista sem perder cobertura.
-
-    Limitação conhecida: não usa uma "public suffix list", por isso
-    mantém sempre pelo menos 2 labels (ex: nunca reduz a apenas "com").
-    Domínios com TLDs compostos (ex: "co.uk", "com.br") podem, em casos
-    raros, ser tratados como "pai" de algo que na prática é um domínio
-    independente (ex: "example.co.uk" não deveria ser considerado pai
-    de "other.co.uk"). Para a esmagadora maioria dos casos isto não é
-    um problema, mas fica documentado.
-    """
-    domains_set = set(domains)
-    result = set()
-    removed_count = 0
-
-    for domain in domains_set:
-        labels = domain.split(".")
-        is_redundant = False
-
-        # Gera candidatos a "pai": vai removendo o label mais à esquerda,
-        # mas nunca reduz a menos de 2 labels (evita tratar TLDs como pai).
-        for i in range(1, len(labels) - 1):
-            parent_candidate = ".".join(labels[i:])
-            if parent_candidate in domains_set:
-                is_redundant = True
-                break
-
-        if is_redundant:
-            removed_count += 1
-        else:
-            result.add(domain)
-
-    if removed_count:
-        print(f"Subdomínios redundantes removidos: {removed_count}")
-
-    return result
-
-
-def generate_combined_list():
-    sources_file = "sources.txt"
-    downloaded_blocklists_dir = "blocklists/downloaded"
-    custom_blocklists_dir = "blocklists/custom"
-    whitelists_dir = "whitelists"
-    output_file = "combined-blocklist.txt"
-
-    # 1. Descarregar listas de bloqueio externas (em paralelo, com retries)
-    os.makedirs(downloaded_blocklists_dir, exist_ok=True)
-    if os.path.exists(sources_file):
-        with open(sources_file, "r", encoding="utf-8") as f:
-            urls = [line.strip() for line in f if line.strip() and not line.startswith("#")]
-
-        results = download_all(urls, downloaded_blocklists_dir)
-        ok_count = sum(1 for v in results.values() if v)
-        fail_count = len(results) - ok_count
-        print(f"Downloads: {ok_count} com sucesso, {fail_count} falharam (de {len(results)} fontes).")
-        if fail_count:
-            failed_urls = [u for u, ok in results.items() if not ok]
-            print("Fontes que falharam: " + ", ".join(failed_urls))
-
-    # 2. Carregar domínios da whitelist
-    whitelist_domains = set()
-    for filepath in glob.glob(os.path.join(whitelists_dir, "*.txt")):
-        print(f"A carregar whitelist de: {filepath}")
-        with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
-            for line in f:
-                domain, domain_type = clean_and_normalize_domain(line)
-                if domain and domain_type in ("block", "whitelist"):
-                    whitelist_domains.add(domain)
-
-    # 3. Carregar e filtrar domínios das blocklists (descarregadas e personalizadas)
-    combined_domains_raw = set()
-    source_stats = {}
-
-    for filepath in glob.glob(os.path.join(downloaded_blocklists_dir, "*.txt")):
-        print(f"A processar blocklist descarregada: {filepath}")
-        added = 0
-        with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
-            for line in f:
-                domain, domain_type = clean_and_normalize_domain(line)
-                if domain_type == "block" and domain not in whitelist_domains:
-                    combined_domains_raw.add(domain)
-                    added += 1
-                elif domain_type == "whitelist":
-                    whitelist_domains.add(domain)
-        source_stats[filepath] = added
-
-    for filepath in glob.glob(os.path.join(custom_blocklists_dir, "*.txt")):
-        print(f"A processar blocklist personalizada: {filepath}")
-        added = 0
-        with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
-            for line in f:
-                domain, domain_type = clean_and_normalize_domain(line)
-                if domain_type == "block" and domain not in whitelist_domains:
-                    combined_domains_raw.add(domain)
-                    added += 1
-        source_stats[filepath] = added
-
-    print("Domínios adicionados por fonte:")
-    for filepath, count in sorted(source_stats.items(), key=lambda x: -x[1]):
-        print(f"  {filepath}: {count}")
-
-    # 3.5 Remover subdomínios redundantes (ex: descartar "ads.tracker.com"
-    #     se "tracker.com" já está na lista)
-    before_count = len(combined_domains_raw)
-    combined_domains_raw = remove_redundant_subdomains(combined_domains_raw)
-    after_count = len(combined_domains_raw)
-    print(f"Total antes da remoção de subdomínios redundantes: {before_count}")
-    print(f"Total depois da remoção de subdomínios redundantes: {after_count}")
-
-    # 4. Escrever para o ficheiro de saída no formato ||domínio^
-    with open(output_file, "w", encoding="utf-8") as f:
+    # 6. Escrever (ficheiro temporário + replace)
+    tmp = OUTPUT_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
         f.write("! Title: Combined AdGuard Home Blocklist\n")
         f.write(f"! Last Updated: {time.strftime('%Y-%m-%d %H:%M:%S GMT', time.gmtime())}\n")
         f.write("! Expires: 1 day\n")
-        f.write("! Homepage: https://github.com/D34thSkull/blocklist-auto\n")
-        f.write("! Version: 1.0\n")
-        f.write("!\n")
+        f.write(f"! Homepage: {HOMEPAGE}\n")
+        f.write(f"! Domains: {len(final)}\n!\n")
+        f.writelines(f"||{d}^\n" for d in sorted(final))
+        f.writelines(f"@@||{d}^\n" for d in exceptions)
+    os.replace(tmp, OUTPUT_FILE)
 
-        count = 0
-        for domain in sorted(combined_domains_raw):
-            f.write(f"||{domain}^\n")
-            count += 1
-
-        print(f"Lista consolidada gerada em '{output_file}' com {count} domínios no formato AdGuard/Adblock Plus.")
+    print(f"\nBruto: {len(blocked)} | após whitelist: {len(kept)} | "
+          f"após remover redundantes: {len(final)} | exceções: {len(exceptions)}")
+    print(f"Gerado '{OUTPUT_FILE}'.")
+    return 0
 
 
 if __name__ == "__main__":
-    try:
-        import requests  # noqa: F401
-    except ImportError:
-        print("A biblioteca 'requests' não está instalada. Por favor, instala-a com: pip install requests")
-        exit(1)
-
-    generate_combined_list()
+    sys.exit(generate())
