@@ -1,4 +1,3 @@
-import hashlib
 import ipaddress
 import os
 import re
@@ -12,7 +11,6 @@ import requests
 BASE_DIR = Path(__file__).resolve().parent
 SOURCES_FILE = BASE_DIR / "sources.txt"
 WHITELISTS_DIR = BASE_DIR / "whitelists"
-CUSTOM_BLOCKLISTS_DIR = BASE_DIR / "blocklists" / "custom"
 OUTPUT_FILE = BASE_DIR / "combined-blocklist.txt"
 
 MAX_RESPONSE_BYTES = 50 * 1024 * 1024
@@ -286,12 +284,6 @@ def main():
 
         all_blocked = set()
         for _, filepath in sorted(source_results):
-            blocked, exceptions = read_blocklist_file(filepath)
-            all_blocked.update(blocked)
-            whitelist_domains.update(exceptions)
-
-    if CUSTOM_BLOCKLISTS_DIR.is_dir():
-        for filepath in sorted(CUSTOM_BLOCKLISTS_DIR.glob("*.txt")):
             blocked, exceptions = read_blocklist_file(filepath)
             all_blocked.update(blocked)
             whitelist_domains.update(exceptions)
